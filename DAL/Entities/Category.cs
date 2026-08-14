@@ -7,7 +7,7 @@ using System.Threading.Tasks;
 namespace DAL.Entities
 {
     // Events Category
-    public enum Category : byte
+    public enum Category : int
     {
         Festival = 1,
         Sport,

@@ -72,24 +72,11 @@ pipeline {
         }
 
         stage('Deploy') {
-            steps {
-                echo 'Deploying application...'
-
-                sh '''
-                    sudo systemctl stop "$APP_NAME" || true
-
-                    sudo rm -rf "$APP_DIR"/*
-
-                    sudo cp -r "$PUBLISH_DIR"/. "$APP_DIR"/
-
-                    sudo chown -R www-data:www-data "$APP_DIR"
-
-                    sudo systemctl start "$APP_NAME"
-
-                    sudo systemctl status "$APP_NAME" --no-pager
-                '''
-            }
-        }
+   	    steps {
+       	        echo 'Deploying application...'
+                sh 'sudo /usr/local/bin/deploy-event-management.sh'
+   		 }
+	    }
 
         stage('Health Check') {
             steps {

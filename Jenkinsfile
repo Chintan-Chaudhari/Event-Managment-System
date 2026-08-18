@@ -135,7 +135,7 @@ pipeline {
                         --env-file "$ENV_FILE" \
                         -e ASPNETCORE_ENVIRONMENT=Production \
                         -e ASPNETCORE_URLS=http://0.0.0.0:${CONTAINER_PORT} \
-                        -p 127.0.0.1:${HOST_PORT}:${CONTAINER_PORT} \
+                        -p ${HOST_PORT}:${CONTAINER_PORT} \
                         "$IMAGE_NAME:${BUILD_NUMBER}"
 
                     echo "Container started."

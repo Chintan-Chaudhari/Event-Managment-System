@@ -5,17 +5,12 @@ pipeline {
     environment {
         APP_NAME       = 'event-management'
         IMAGE_NAME     = 'event-management'
-
-        // Change this to your Docker Hub / registry username
-        DOCKER_REGISTRY = 'YOUR_DOCKER_USERNAME'
-
         IMAGE_TAG      = "${BUILD_NUMBER}"
 
         K8S_NAMESPACE  = 'event-management'
 
         PROJECT        = 'Event Managment System/Event Managment System.csproj'
 
-        // Kubernetes manifest directory
         K8S_DIR        = 'k8s'
     }
 
@@ -32,12 +27,20 @@ pipeline {
             steps {
                 echo 'Building Docker image...'
 
-                sh '''
-                    docker build \
-                        -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
-                        -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest \
-                        .
-                '''
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-registry-credentials',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        docker build \
+                            -t "$DOCKER_USER/$IMAGE_NAME:$IMAGE_TAG" \
+                            -t "$DOCKER_USER/$IMAGE_NAME:latest" \
+                            .
+                    '''
+                }
             }
         }
 
@@ -55,7 +58,7 @@ pipeline {
                     sh '''
                         echo "$DOCKER_PASSWORD" | \
                         docker login \
-                            -u "$DOCKER_USER" \
+                            --username "$DOCKER_USER" \
                             --password-stdin
                     '''
                 }
@@ -66,11 +69,18 @@ pipeline {
             steps {
                 echo 'Pushing Docker image...'
 
-                sh '''
-                    docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
-
-                    docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest
-                '''
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-registry-credentials',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        docker push "$DOCKER_USER/$IMAGE_NAME:$IMAGE_TAG"
+                        docker push "$DOCKER_USER/$IMAGE_NAME:latest"
+                    '''
+                }
             }
         }
 
@@ -79,7 +89,7 @@ pipeline {
                 echo 'Creating Kubernetes namespace if required...'
 
                 sh '''
-                    kubectl create namespace ${K8S_NAMESPACE} \
+                    kubectl create namespace "$K8S_NAMESPACE" \
                         --dry-run=client \
                         -o yaml | kubectl apply -f -
                 '''
@@ -92,8 +102,8 @@ pipeline {
 
                 sh '''
                     kubectl apply \
-                        -n ${K8S_NAMESPACE} \
-                        -f ${K8S_DIR}/
+                        -n "$K8S_NAMESPACE" \
+                        -f "$K8S_DIR/"
                 '''
             }
         }
@@ -102,12 +112,20 @@ pipeline {
             steps {
                 echo 'Updating Kubernetes deployment image...'
 
-                sh '''
-                    kubectl set image \
-                        deployment/${APP_NAME} \
-                        ${APP_NAME}=${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
-                        -n ${K8S_NAMESPACE}
-                '''
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-registry-credentials',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        kubectl set image \
+                            deployment/"$APP_NAME" \
+                            "$APP_NAME=$DOCKER_USER/$IMAGE_NAME:$IMAGE_TAG" \
+                            -n "$K8S_NAMESPACE"
+                    '''
+                }
             }
         }
 
@@ -117,8 +135,8 @@ pipeline {
 
                 sh '''
                     kubectl rollout status \
-                        deployment/${APP_NAME} \
-                        -n ${K8S_NAMESPACE} \
+                        deployment/"$APP_NAME" \
+                        -n "$K8S_NAMESPACE" \
                         --timeout=180s
                 '''
             }
@@ -130,15 +148,19 @@ pipeline {
 
                 sh '''
                     echo "========== PODS =========="
-                    kubectl get pods -n ${K8S_NAMESPACE} -o wide
+                    kubectl get pods \
+                        -n "$K8S_NAMESPACE" \
+                        -o wide
 
                     echo ""
                     echo "========== SERVICES =========="
-                    kubectl get svc -n ${K8S_NAMESPACE}
+                    kubectl get svc \
+                        -n "$K8S_NAMESPACE"
 
                     echo ""
                     echo "========== DEPLOYMENT =========="
-                    kubectl get deployment -n ${K8S_NAMESPACE}
+                    kubectl get deployment \
+                        -n "$K8S_NAMESPACE"
                 '''
             }
         }
@@ -147,17 +169,25 @@ pipeline {
     post {
 
         success {
-            echo """
+            withCredentials([
+                usernamePassword(
+                    credentialsId: 'docker-registry-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASSWORD'
+                )
+            ]) {
+                echo """
 ========================================
 KUBERNETES DEPLOYMENT SUCCESSFUL
 ========================================
 
 Application : ${APP_NAME}
-Image       : ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+Image       : ${DOCKER_USER}/${IMAGE_NAME}:${IMAGE_TAG}
 Namespace   : ${K8S_NAMESPACE}
 
 ========================================
 """
+            }
         }
 
         failure {
@@ -171,7 +201,7 @@ KUBERNETES DEPLOYMENT FAILED
                 echo "========== POD STATUS =========="
 
                 kubectl get pods \
-                    -n ${K8S_NAMESPACE} \
+                    -n "$K8S_NAMESPACE" \
                     -o wide || true
 
                 echo ""
@@ -179,8 +209,8 @@ KUBERNETES DEPLOYMENT FAILED
                 echo "========== APPLICATION LOGS =========="
 
                 kubectl logs \
-                    -n ${K8S_NAMESPACE} \
-                    -l app=${APP_NAME} \
+                    -n "$K8S_NAMESPACE" \
+                    -l app="$APP_NAME" \
                     --tail=100 || true
 
                 echo ""
@@ -188,7 +218,7 @@ KUBERNETES DEPLOYMENT FAILED
                 echo "========== POD EVENTS =========="
 
                 kubectl get events \
-                    -n ${K8S_NAMESPACE} \
+                    -n "$K8S_NAMESPACE" \
                     --sort-by=.metadata.creationTimestamp \
                     | tail -30 || true
             '''
@@ -199,3 +229,4 @@ KUBERNETES DEPLOYMENT FAILED
         }
     }
 }
+

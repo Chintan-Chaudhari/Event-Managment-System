@@ -1,4 +1,3 @@
-```groovy
 pipeline {
 
     agent any
@@ -200,4 +199,3 @@ KUBERNETES DEPLOYMENT FAILED
         }
     }
 }
-```

@@ -1,3 +1,4 @@
+```groovy
 pipeline {
 
     agent any
@@ -5,20 +6,18 @@ pipeline {
     environment {
         APP_NAME       = 'event-management'
         IMAGE_NAME     = 'event-management'
-        NETWORK_NAME   = 'event-network'
+
+        // Change this to your Docker Hub / registry username
+        DOCKER_REGISTRY = 'YOUR_DOCKER_USERNAME'
+
+        IMAGE_TAG      = "${BUILD_NUMBER}"
+
+        K8S_NAMESPACE  = 'event-management'
 
         PROJECT        = 'Event Managment System/Event Managment System.csproj'
-        SOLUTION       = 'Event Managment System.sln'
-        PUBLISH_DIR    = 'publish'
 
-        // Application container port
-        CONTAINER_PORT = '8084'
-
-        // Host port used by Nginx
-        HOST_PORT      = '5000'
-
-        // Production environment file
-        ENV_FILE       = '/etc/event-management/event-management.env'
+        // Kubernetes manifest directory
+        K8S_DIR        = 'k8s'
     }
 
     stages {
@@ -30,159 +29,117 @@ pipeline {
             }
         }
 
-        stage('Restore') {
-            steps {
-                echo 'Restoring NuGet packages...'
-
-                sh '''
-                    dotnet restore "$SOLUTION"
-                '''
-            }
-        }
-
-        stage('Build') {
-            steps {
-                echo 'Building application...'
-
-                sh '''
-                    dotnet build "$SOLUTION" \
-                        --configuration Release \
-                        --no-restore
-                '''
-            }
-        }
-
-        stage('Test') {
-            steps {
-                echo 'Running tests...'
-
-                sh '''
-                    TEST_PROJECTS=$(find . \
-                        \\( -name "*Tests.csproj" -o -name "*Test.csproj" \\))
-
-                    if [ -n "$TEST_PROJECTS" ]; then
-                        dotnet test "$SOLUTION" \
-                            --configuration Release \
-                            --no-build \
-                            --verbosity normal
-                    else
-                        echo "No test projects found. Skipping tests."
-                    fi
-                '''
-            }
-        }
-
-        stage('Publish') {
-            steps {
-                echo 'Publishing ASP.NET Core application...'
-
-                sh '''
-                    rm -rf "$PUBLISH_DIR"
-
-                    dotnet publish "$PROJECT" \
-                        --configuration Release \
-                        --no-restore \
-                        --output "$PUBLISH_DIR"
-                '''
-            }
-        }
-
         stage('Docker Build') {
             steps {
                 echo 'Building Docker image...'
 
                 sh '''
                     docker build \
-                        -t ${IMAGE_NAME}:${BUILD_NUMBER} \
-                        -t ${IMAGE_NAME}:latest \
+                        -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
+                        -t ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest \
                         .
                 '''
             }
         }
 
-        stage('Docker Network') {
+        stage('Docker Login') {
             steps {
-                echo 'Checking Docker network...'
+                echo 'Logging in to Docker registry...'
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'docker-registry-credentials',
+                        usernameVariable: 'DOCKER_USER',
+                        passwordVariable: 'DOCKER_PASSWORD'
+                    )
+                ]) {
+                    sh '''
+                        echo "$DOCKER_PASSWORD" | \
+                        docker login \
+                            -u "$DOCKER_USER" \
+                            --password-stdin
+                    '''
+                }
+            }
+        }
+
+        stage('Push Docker Image') {
+            steps {
+                echo 'Pushing Docker image...'
 
                 sh '''
-                    if ! docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
-                        echo "Creating Docker network: $NETWORK_NAME"
-                        docker network create "$NETWORK_NAME"
-                    else
-                        echo "Docker network already exists: $NETWORK_NAME"
-                    fi
+                    docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+
+                    docker push ${DOCKER_REGISTRY}/${IMAGE_NAME}:latest
                 '''
             }
         }
 
-        stage('Deploy Docker Container') {
+        stage('Create Namespace') {
             steps {
-                echo 'Deploying Docker container...'
+                echo 'Creating Kubernetes namespace if required...'
 
                 sh '''
-                    set -e
-
-                    echo "Stopping old container..."
-
-                    docker rm -f "$APP_NAME" 2>/dev/null || true
-
-                    echo "Starting new container..."
-
-                    docker run -d \
-                        --name "$APP_NAME" \
-                        --restart unless-stopped \
-                        --network "$NETWORK_NAME" \
-                        --env-file "$ENV_FILE" \
-                        -e ASPNETCORE_ENVIRONMENT=Production \
-                        -e ASPNETCORE_URLS=http://0.0.0.0:${CONTAINER_PORT} \
-                        -p ${HOST_PORT}:${CONTAINER_PORT} \
-                        "$IMAGE_NAME:${BUILD_NUMBER}"
-
-                    echo "Container started."
-
-                    docker ps \
-                        --filter "name=$APP_NAME"
+                    kubectl create namespace ${K8S_NAMESPACE} \
+                        --dry-run=client \
+                        -o yaml | kubectl apply -f -
                 '''
             }
         }
 
-        stage('Docker Health Check') {
+        stage('Deploy to Kubernetes') {
             steps {
-                echo 'Checking Docker container health...'
+                echo 'Deploying application to Kubernetes...'
 
                 sh '''
-                    set -e
-
-                    echo "Waiting for application to start..."
-                    sleep 10
-
-                    if ! docker ps --filter "name=$APP_NAME" --filter "status=running" | grep -q "$APP_NAME"; then
-                        echo "Container is not running."
-                        docker logs "$APP_NAME" --tail 100
-                        exit 1
-                    fi
-
-                    echo "Testing application..."
-
-                    curl --fail \
-                        --silent \
-                        --show-error \
-                        http://127.0.0.1:${HOST_PORT}/ \
-                        > /dev/null
-
-                    echo "Application is UP"
+                    kubectl apply \
+                        -n ${K8S_NAMESPACE} \
+                        -f ${K8S_DIR}/
                 '''
             }
         }
 
-        stage('Docker Status') {
+        stage('Update Application Image') {
             steps {
-                echo 'Docker deployment status...'
+                echo 'Updating Kubernetes deployment image...'
 
                 sh '''
-                    docker ps \
-                        --filter "name=$APP_NAME" \
-                        --format "table {{.Names}}\\t{{.Image}}\\t{{.Status}}\\t{{.Ports}}"
+                    kubectl set image \
+                        deployment/${APP_NAME} \
+                        ${APP_NAME}=${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
+                        -n ${K8S_NAMESPACE}
+                '''
+            }
+        }
+
+        stage('Wait for Rollout') {
+            steps {
+                echo 'Waiting for Kubernetes deployment...'
+
+                sh '''
+                    kubectl rollout status \
+                        deployment/${APP_NAME} \
+                        -n ${K8S_NAMESPACE} \
+                        --timeout=180s
+                '''
+            }
+        }
+
+        stage('Kubernetes Status') {
+            steps {
+                echo 'Checking Kubernetes resources...'
+
+                sh '''
+                    echo "========== PODS =========="
+                    kubectl get pods -n ${K8S_NAMESPACE} -o wide
+
+                    echo ""
+                    echo "========== SERVICES =========="
+                    kubectl get svc -n ${K8S_NAMESPACE}
+
+                    echo ""
+                    echo "========== DEPLOYMENT =========="
+                    kubectl get deployment -n ${K8S_NAMESPACE}
                 '''
             }
         }
@@ -191,29 +148,50 @@ pipeline {
     post {
 
         success {
-            echo '''
+            echo """
 ========================================
-CI/CD DOCKER DEPLOYMENT SUCCESSFUL
+KUBERNETES DEPLOYMENT SUCCESSFUL
 ========================================
-Application : event-management
-Image       : event-management:${BUILD_NUMBER}
-Network     : event-network
-Host Port   : 127.0.0.1:5000
+
+Application : ${APP_NAME}
+Image       : ${DOCKER_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+Namespace   : ${K8S_NAMESPACE}
+
 ========================================
-'''
+"""
         }
 
         failure {
-            echo '''
+            echo """
 ========================================
-CI/CD DOCKER DEPLOYMENT FAILED
+KUBERNETES DEPLOYMENT FAILED
 ========================================
-Showing container logs...
-========================================
-'''
+"""
 
             sh '''
-                docker logs "$APP_NAME" --tail 100 2>/dev/null || true
+                echo "========== POD STATUS =========="
+
+                kubectl get pods \
+                    -n ${K8S_NAMESPACE} \
+                    -o wide || true
+
+                echo ""
+
+                echo "========== APPLICATION LOGS =========="
+
+                kubectl logs \
+                    -n ${K8S_NAMESPACE} \
+                    -l app=${APP_NAME} \
+                    --tail=100 || true
+
+                echo ""
+
+                echo "========== POD EVENTS =========="
+
+                kubectl get events \
+                    -n ${K8S_NAMESPACE} \
+                    --sort-by=.metadata.creationTimestamp \
+                    | tail -30 || true
             '''
         }
 
@@ -222,3 +200,4 @@ Showing container logs...
         }
     }
 }
+```
